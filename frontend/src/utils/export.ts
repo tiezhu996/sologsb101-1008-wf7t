@@ -6,7 +6,9 @@ import type { Building } from '@/types/building'
 import type { Valve } from '@/types/valve'
 import type { Measure } from '@/types/measure'
 import type { Adjust } from '@/types/adjust'
+import type { StationMigration } from '@/types/migration'
 import { imbalance, balanceLevel, flowRatio } from '@/utils/balance'
+import { resolveAdjustStationId } from '@/utils/migration'
 
 export function download(filename: string, content: string, mime: string): void {
   const blob = new Blob([content], { type: mime })
@@ -37,16 +39,23 @@ export function csvCell(value: string | number): string {
   return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
 }
 
-/** 导出调节单 CSV（含失衡度与流量比） */
+/**
+ * 导出调节单 CSV（含失衡度与流量比）
+ * 换热站按调节单派单时归属快照认账（旧单缺快照时由迁移时效解析兜底），不随楼栋改挂追溯。
+ */
 export function exportAdjustCsv(
   stations: Station[],
   buildings: Building[],
   valves: Valve[],
   measures: Measure[],
-  adjusts: Adjust[]
+  adjusts: Adjust[],
+  migrations: StationMigration[] = []
 ): string {
+  const stationById = new Map(stations.map((station) => [station.id, station]))
+  const buildingById = new Map(buildings.map((building) => [building.id, building]))
+  const valveById = new Map(valves.map((valve) => [valve.id, valve]))
   const header = [
-    '换热站',
+    '换热站(派单时归属)',
     '楼栋',
     '供热方式',
     '阀门编号',
@@ -67,9 +76,11 @@ export function exportAdjustCsv(
   ]
   const lines: string[] = [header.map(csvCell).join(',')]
   adjusts.forEach((adjust) => {
-    const valve = valves.find((item) => item.id === adjust.valveId)
-    const building = valve ? buildings.find((item) => item.id === valve.buildingId) ?? null : null
-    const station = building ? stations.find((item) => item.id === building.stationId) ?? null : null
+    const valve = valveById.get(adjust.valveId)
+    const building = valve ? buildingById.get(valve.buildingId) ?? null : null
+    // 历史调节单认原站：优先派单快照，缺省时按 createdAt 在迁移链上解析
+    const stationId = resolveAdjustStationId(adjust, valve, migrations)
+    const station = stationById.get(stationId) ?? null
     const own = measures.filter((item) => item.valveId === adjust.valveId).sort((a, b) => a.date.localeCompare(b.date))
     const latest = own[own.length - 1]
     const design = valve ? valve.designFlowM3h : 0
@@ -106,26 +117,34 @@ export function exportAdjustCsv(
   return filename
 }
 
-/** 导出失衡度排行 CSV */
+/**
+ * 导出失衡度排行 CSV
+ * 换热站按「最新实测当时的归属」认账：生效前的历史实测仍认原站，不因楼栋改挂追溯。
+ */
 export function exportBalanceCsv(
   rows: Array<{
     station: Station | null
     building: Building | null
     valve: Valve
+    /** 最新实测当时的归属站（由调用方按时效解析）；无实测时取当前生效站 */
+    latestStationId?: string
     measured: number
     ratio: number
     flowDeviation: number
     roomDeviation: number
     imbalanceValue: number
     level: string
-  }>
+  }>,
+  stations: Station[] = []
 ): string {
-  const header = ['换热站', '楼栋', '阀门编号', '设计流量', '实测流量', '流量比', '流量偏差(%)', '室温偏差(℃)', '失衡度(%)', '判级']
+  const stationById = new Map(stations.map((station) => [station.id, station]))
+  const header = ['换热站(实测时归属)', '楼栋', '阀门编号', '设计流量', '实测流量', '流量比', '流量偏差(%)', '室温偏差(℃)', '失衡度(%)', '判级']
   const lines: string[] = [header.map(csvCell).join(',')]
   rows.forEach((row) => {
+    const historicalStation = row.latestStationId ? stationById.get(row.latestStationId) ?? null : row.station
     lines.push(
       [
-        row.station ? row.station.name : '—',
+        historicalStation ? historicalStation.name : '—',
         row.building ? row.building.name : '—',
         row.valve.code,
         row.valve.designFlowM3h,

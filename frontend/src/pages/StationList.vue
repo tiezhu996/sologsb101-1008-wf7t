@@ -34,16 +34,18 @@ const rank = useImbalanceRank()
 /* ------------------------------ 派生 ------------------------------ */
 
 const valveCountOf = (stationId: string): number =>
-  valveStore.valves.filter((valve) => valve.stationId === stationId).length
+  valveStore.enriched.filter((item) => item.effectiveStationId === stationId).length
 
 const imbalancedCountOf = (stationId: string): number =>
-  rank.rows.value.filter((row) => row.valve.stationId === stationId && row.level !== '平衡').length
+  rank.rows.value.filter((row) => row.effectiveStationId === stationId && row.level !== '平衡').length
 
 const pendingReviewOf = (stationId: string): number =>
   adjustStore.adjusts.filter((adjust) => {
     if (adjust.state === '已复核') return false
     const valve = valveStore.valves.find((item) => item.id === adjust.valveId)
-    return valve ? valve.stationId === stationId : false
+    if (!valve) return false
+    // 未完单随楼栋当前生效归属计到对应站
+    return stationStore.effectiveStationIdOfBuilding(valve.buildingId) === stationId
   }).length
 
 const stationColumns = [
@@ -293,7 +295,7 @@ function goValves(stationId: string): void {
             <span>· {{ station.supplyTempC }}/{{ station.returnTempC }} ℃</span>
           </div>
           <div class="card-list-item__meta">
-            <span>楼栋 {{ stationStore.buildingsOf(station.id).length }}</span>
+            <span>楼栋 {{ stationStore.effectiveBuildingsOfStation(station.id).length }}</span>
             <span>· 阀门 {{ valveCountOf(station.id) }}</span>
             <span :style="{ color: imbalancedCountOf(station.id) > 0 ? '#c0392b' : undefined }">
               · 失衡 {{ imbalancedCountOf(station.id) }}
@@ -367,7 +369,7 @@ function goValves(stationId: string): void {
             </t-tag>
           </template>
           <template #valveCountCell="{ row }">
-            {{ valveStore.valves.filter((valve) => valve.buildingId === row.id).length }}
+            {{ valveStore.enriched.filter((item) => item.valve.buildingId === row.id).length }}
           </template>
           <template #opCell="{ row }">
             <div class="toolbar">

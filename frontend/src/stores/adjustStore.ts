@@ -5,7 +5,7 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { useIdbTable } from '@/hooks/useIdbTable'
-import { db, type AdjustRow } from '@/utils/db'
+import { db, ROW_REVISION, type AdjustRow } from '@/utils/db'
 import {
   ADJUST_STATE_FLOW,
   type Adjust,
@@ -13,12 +13,19 @@ import {
   type AdjustState
 } from '@/types/adjust'
 import { useValveStore } from '@/stores/valveStore'
+import { useStationStore } from '@/stores/stationStore'
+import { useMigrationStore } from '@/stores/migrationStore'
 import { balanceLevel, imbalance, type BalanceLevel } from '@/utils/balance'
+import { resolveAdjustStationId } from '@/utils/migration'
 import type { Valve } from '@/types/valve'
+import type { Station } from '@/types/station'
 
 export interface AdjustEnriched {
   adjust: Adjust
   valve: Valve | null
+  /** 派单时归属站（历史单认原站，不随楼栋改挂追溯） */
+  station: Station | null
+  stationId: string
   /** 生成调节单时的失衡度快照（按最新实测重算） */
   imbalanceValue: number
   level: BalanceLevel
@@ -27,6 +34,8 @@ export interface AdjustEnriched {
 export const useAdjustStore = defineStore('adjust', () => {
   const adjustTable = useIdbTable<AdjustRow>((database) => database.adjusts, { sortByUpdatedAt: false })
   const valveStore = useValveStore()
+  const stationStore = useStationStore()
+  const migrationStore = useMigrationStore()
 
   const stateFilter = ref<AdjustState[]>([])
   const keyword = ref('')
@@ -52,6 +61,9 @@ export const useAdjustStore = defineStore('adjust', () => {
   const enriched = computed<AdjustEnriched[]>(() =>
     adjusts.value.map((adjust) => {
       const valve = valveStore.valves.find((item) => item.id === adjust.valveId) ?? null
+      // 历史调节单按派单时归属认账；缺快照的旧单由迁移时效解析兜底
+      const stationId = resolveAdjustStationId(adjust, valve ?? undefined, migrationStore.chain)
+      const station = stationStore.stations.find((item) => item.id === stationId) ?? null
       const snapshot = latestMeasureByValve.value[adjust.valveId]
       const design = valve ? valve.designFlowM3h : 0
       const measured = snapshot ? snapshot.flowM3h : 0
@@ -60,6 +72,8 @@ export const useAdjustStore = defineStore('adjust', () => {
       return {
         adjust,
         valve,
+        station,
+        stationId,
         imbalanceValue: value,
         level: valve && snapshot ? balanceLevel(value, measured, design) : '平衡'
       }
@@ -104,9 +118,19 @@ export const useAdjustStore = defineStore('adjust', () => {
   const hasAdjust = (valveId: string): boolean => adjusts.value.some((adjust) => adjust.valveId === valveId)
 
   async function createAdjust(draft: AdjustDraft): Promise<AdjustRow> {
+    const valve = valveStore.valves.find((item) => item.id === draft.valveId)
+    // 派单即归属：按当前生效站快照写入，之后不再随迁移追溯改写
+    const effectiveStationId = valve
+      ? resolveAdjustStationId(
+          { stationId: undefined, valveId: valve.id, createdAt: Date.now() },
+          valve,
+          migrationStore.chain
+        )
+      : ''
     return (await adjustTable.create(
       {
         valveId: draft.valveId,
+        stationId: draft.stationId || effectiveStationId,
         targetOpening: Math.min(100, Math.max(0, Math.round(draft.targetOpening))),
         basis: draft.basis.trim(),
         executor: draft.executor.trim() || '待指派',
@@ -159,13 +183,20 @@ export const useAdjustStore = defineStore('adjust', () => {
       .map((row, index) => ({
         id: `aj_${now.toString(36)}${index}${Math.random().toString(36).slice(2, 5)}`,
         valveId: row.valve.id,
+        // 批量派单同样按当前生效归属写站快照
+        stationId: resolveAdjustStationId(
+          { stationId: undefined, valveId: row.valve.id, createdAt: now },
+          row.valve,
+          migrationStore.chain
+        ),
         targetOpening: row.suggestOpening,
         basis: row.basisText,
         executor: '待指派',
         state: '待下发' as AdjustState,
         reviewNote: '',
         createdAt: now,
-        updatedAt: now
+        updatedAt: now,
+        revision: ROW_REVISION
       }))
     if (payload.length > 0) await db.adjusts.bulkPut(payload)
     return payload.length

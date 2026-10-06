@@ -177,15 +177,17 @@ function exportCsv(): void {
       station: row.station,
       building: row.building,
       valve: row.valve,
+      latestStationId: row.latestStationId,
       measured: row.measured,
       ratio: row.ratio,
       flowDeviation: row.flowDeviation,
       roomDeviation: row.roomDeviation,
       imbalanceValue: row.imbalanceValue,
       level: row.level
-    }))
+    })),
+    stationStore.stations
   )
-  MessagePlugin.success(`已导出 ${filename}`)
+  MessagePlugin.success(`已导出 ${filename}（换热站按实测当时归属认原站）`)
 }
 
 function onOnlyImbalancedChange(value: unknown): void {

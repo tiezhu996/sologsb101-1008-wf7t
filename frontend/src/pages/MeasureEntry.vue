@@ -14,15 +14,19 @@ import { useIdbTable } from '@/hooks/useIdbTable'
 import { useValveStore } from '@/stores/valveStore'
 import { useStationStore } from '@/stores/stationStore'
 import { useImbalanceRank } from '@/hooks/useImbalanceRank'
+import { useMigrationStore } from '@/stores/migrationStore'
 import { EMPTY_MEASURE_DRAFT, type Measure, type MeasureDraft } from '@/types/measure'
 import type { MeasureRow } from '@/utils/db'
+import { ROW_REVISION } from '@/utils/db'
 import { balanceLevel, formatFlow, formatTemp, imbalance } from '@/utils/balance'
+import { resolveMeasureStationId } from '@/utils/migration'
 import { parseMeasureBatch } from '@/utils/export'
 
 type FilterModel = { keyword: string; [key: string]: string | string[] | boolean }
 
 const valveStore = useValveStore()
 const stationStore = useStationStore()
+const migrationStore = useMigrationStore()
 const rank = useImbalanceRank()
 const measureTable = useIdbTable<MeasureRow>((database) => database.measures, { sortByUpdatedAt: false })
 
@@ -74,6 +78,12 @@ const measuresOfActive = computed(() =>
     .sort((a, b) => b.date.localeCompare(a.date))
 )
 
+/** 每条历史实测按其当时归属站认账（旧记录缺快照时按时效解析兜底） */
+const stationNameOfMeasure = (measure: MeasureRow): string => {
+  const stationId = resolveMeasureStationId(measure, activeValve.value ?? undefined, migrationStore.chain)
+  return stationStore.stationById.get(stationId)?.name ?? '未知换热站'
+}
+
 const latestMeasures = computed(() =>
   [...measureTable.rows.value].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 12)
 )
@@ -99,6 +109,8 @@ function openCreate(): void {
   detailTitle.value = `录入实测 · ${activeValve.value.code}`
   Object.assign(form, {
     valveId: activeValve.value.id,
+    // 录数走新站：归属快照取阀门当前生效站
+    stationId: stationStore.effectiveStationIdOfBuilding(activeValve.value.buildingId),
     date: new Date().toISOString().slice(0, 10),
     flowM3h: activeRow.value?.measured || activeValve.value.designFlowM3h,
     supplyTempC: 50,
@@ -114,6 +126,8 @@ function openEdit(measure: Measure): void {
   detailTitle.value = `编辑实测 · ${measure.date}`
   Object.assign(form, {
     valveId: measure.valveId,
+    // 历史实测归属不追溯改站：编辑时保留原快照（缺省也不补当前站）
+    stationId: measure.stationId ?? '',
     date: measure.date,
     flowM3h: measure.flowM3h,
     supplyTempC: measure.supplyTempC,
@@ -178,6 +192,8 @@ async function importBatch(): Promise<void> {
     rows.map((row, index) => ({
       id: `ms_${now.toString(36)}${index}${Math.random().toString(36).slice(2, 5)}`,
       valveId: row.valve!.id,
+      // 批量导入的新记录按阀门当前生效归属快照
+      stationId: stationStore.effectiveStationIdOfBuilding(row.valve!.buildingId),
       date: row.date,
       flowM3h: row.flowM3h,
       supplyTempC: row.supplyTempC,
@@ -185,7 +201,8 @@ async function importBatch(): Promise<void> {
       roomTempC: row.roomTempC,
       operator: row.operator || '批量导入',
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
+      revision: ROW_REVISION
     }))
   )
   MessagePlugin.success(`已批量导入 ${rows.length} 条实测记录`)
@@ -262,7 +279,7 @@ async function importBatch(): Promise<void> {
             <h3 class="panel-title" style="margin: 0">
               {{ activeValve.code }} · 实测明细
               <span class="muted">
-                {{ stationStore.stationById.get(activeValve.stationId)?.name ?? '' }}
+                {{ stationStore.stationById.get(stationStore.effectiveStationIdOfBuilding(activeValve.buildingId))?.name ?? '' }}
               </span>
             </h3>
             <div class="toolbar">
@@ -288,6 +305,7 @@ async function importBatch(): Promise<void> {
             :data="measuresOfActive"
             :columns="[
               { colKey: 'date', title: '日期', width: 120 },
+              { colKey: 'station', title: '归属站', width: 150, cell: 'stationCell' },
               { colKey: 'flow', title: '流量', width: 120, cell: 'flowCell' },
               { colKey: 'supply', title: '供水', width: 96, cell: 'supplyCell' },
               { colKey: 'back', title: '回水', width: 96, cell: 'backCell' },
@@ -299,6 +317,9 @@ async function importBatch(): Promise<void> {
             bordered
             size="small"
           >
+            <template #stationCell="{ row }">
+              <span class="muted">{{ stationNameOfMeasure(row) }}</span>
+            </template>
             <template #flowCell="{ row }">{{ formatFlow(row.flowM3h) }}</template>
             <template #supplyCell="{ row }">{{ formatTemp(row.supplyTempC) }}</template>
             <template #backCell="{ row }">{{ formatTemp(row.returnTempC) }}</template>
@@ -317,6 +338,7 @@ async function importBatch(): Promise<void> {
             :columns="[
               { colKey: 'date', title: '日期', width: 120 },
               { colKey: 'valve', title: '阀门', width: 130, cell: 'valveCell' },
+              { colKey: 'station', title: '归属站', width: 150, cell: 'station2Cell' },
               { colKey: 'flow2', title: '流量', width: 120, cell: 'flow2Cell' },
               { colKey: 'room2', title: '室温', width: 96, cell: 'room2Cell' },
               { colKey: 'operator2', title: '录入人', width: 100, cell: 'operator2Cell' }
@@ -327,6 +349,17 @@ async function importBatch(): Promise<void> {
           >
             <template #valveCell="{ row }">
               {{ valveStore.valves.find((valve) => valve.id === row.valveId)?.code ?? '—' }}
+            </template>
+            <template #station2Cell="{ row }">
+              {{
+                stationStore.stationById.get(
+                  resolveMeasureStationId(
+                    row,
+                    valveStore.valves.find((valve) => valve.id === row.valveId),
+                    migrationStore.chain
+                  )
+                )?.name ?? '—'
+              }}
             </template>
             <template #flow2Cell="{ row }">{{ formatFlow(row.flowM3h) }}</template>
             <template #room2Cell="{ row }">{{ formatTemp(row.roomTempC) }}</template>

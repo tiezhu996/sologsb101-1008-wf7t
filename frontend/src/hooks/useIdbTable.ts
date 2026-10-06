@@ -1,6 +1,6 @@
 import { liveQuery } from 'dexie'
 import { onScopeDispose, ref, shallowRef, type Ref } from 'vue'
-import { db, createId } from '@/utils/db'
+import { db, createId, ROW_REVISION } from '@/utils/db'
 
 export type IdbRecord = { id: string; createdAt?: number; updatedAt?: number }
 
@@ -25,7 +25,7 @@ export interface UseIdbTableResult<T extends IdbRecord> {
   list: () => Promise<T[]>
   create: (payload: NewRecord<T>, idPrefix?: string) => Promise<T>
   update: (id: string, patch: Partial<T>) => Promise<void>
-  upsert: (row: T) => Promise<void>
+  upsert: (row: T) => Promise<T>
   remove: (id: string) => Promise<void>
   bulkRemove: (ids: string[]) => Promise<void>
   bulkPut: (list: T[]) => Promise<void>
@@ -86,18 +86,45 @@ export function useIdbTable<T extends IdbRecord>(
       ...(payload as object),
       id: payload.id ?? createId(idPrefix),
       createdAt: payload.createdAt ?? now,
-      updatedAt: payload.updatedAt ?? now
-    } as T
+      updatedAt: payload.updatedAt ?? now,
+      // 行级版本号：显式传入时尊重（播种 / 导入场景），否则写当前版本
+      revision: (payload as { revision?: number }).revision ?? ROW_REVISION
+    } as unknown as T
     await table.put(record)
     return record
   }
 
   const update = async (id: string, patch: Partial<T>): Promise<void> => {
-    await table.update(id, { ...patch, updatedAt: Date.now() } as never)
+    // 先读后写：在原 revision 上 +1，保证乐观锁版本随每次修订前进
+    const current = await table.get(id)
+    if (!current) return // 与旧 table.update 语义一致：记录不存在时不新建残缺行
+    const currentRevision =
+      typeof (current as unknown as { revision?: number }).revision === 'number'
+        ? (current as unknown as { revision: number }).revision
+        : ROW_REVISION - 1
+    await table.put({
+      ...current,
+      ...(patch as object),
+      id,
+      updatedAt: Date.now(),
+      revision: currentRevision + 1
+    } as unknown as T)
   }
 
-  const upsert = async (row: T): Promise<void> => {
-    await table.put({ ...row, updatedAt: Date.now() } as T)
+  const upsert = async (row: T): Promise<T> => {
+    const current = await table.get(row.id)
+    const currentRevision =
+      current && typeof (current as unknown as { revision?: number }).revision === 'number'
+        ? (current as unknown as { revision: number }).revision
+        : ROW_REVISION - 1
+    const record = {
+      ...(current ?? {}),
+      ...(row as object),
+      updatedAt: Date.now(),
+      revision: currentRevision + 1
+    } as unknown as T
+    await table.put(record)
+    return record
   }
 
   const remove = async (id: string): Promise<void> => {

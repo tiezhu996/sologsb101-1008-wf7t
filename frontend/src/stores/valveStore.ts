@@ -5,7 +5,7 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { useIdbTable } from '@/hooks/useIdbTable'
-import { db, deleteValveCascade, type ValveRow } from '@/utils/db'
+import { db, deleteValveCascade, ROW_REVISION, type ValveRow } from '@/utils/db'
 import {
   clampOpening,
   createEmptyValveFilter,
@@ -16,11 +16,15 @@ import {
 import type { Building } from '@/types/building'
 import type { Station } from '@/types/station'
 import { useStationStore } from '@/stores/stationStore'
+import { useMigrationStore } from '@/stores/migrationStore'
+import { resolveValveStationAt } from '@/utils/migration'
 
 export interface ValveEnriched {
   valve: Valve
   building: Building | null
   station: Station | null
+  /** 当前生效归属站 id（并站迁移到点后即走新站） */
+  effectiveStationId: string
   /** 相对设计流量的开度校核结论 */
   openingCheck: string
 }
@@ -28,6 +32,7 @@ export interface ValveEnriched {
 export const useValveStore = defineStore('valve', () => {
   const valveTable = useIdbTable<ValveRow>((database) => database.valves, { sortByUpdatedAt: false })
   const stationStore = useStationStore()
+  const migrationStore = useMigrationStore()
 
   const filter = ref<ValveFilterState>(createEmptyValveFilter())
   /** 开度编辑草稿：阀门 id → 待提交开度 */
@@ -41,11 +46,13 @@ export const useValveStore = defineStore('valve', () => {
   const enriched = computed<ValveEnriched[]>(() =>
     valves.value.map((valve) => {
       const building = stationStore.buildingById.get(valve.buildingId) ?? null
-      const station = stationStore.stationById.get(valve.stationId) ?? null
+      const effectiveStationId = resolveValveStationAt(valve, building, Date.now(), migrationStore.chain)
+      const station = stationStore.stationById.get(effectiveStationId) ?? null
       return {
         valve,
         building,
         station,
+        effectiveStationId,
         openingCheck: checkOpening(valve)
       }
     })
@@ -55,7 +62,7 @@ export const useValveStore = defineStore('valve', () => {
     const text = filter.value.keyword.trim().toLowerCase()
     return enriched.value.filter((item) => {
       const { valve } = item
-      if (filter.value.stationId && valve.stationId !== filter.value.stationId) return false
+      if (filter.value.stationId && item.effectiveStationId !== filter.value.stationId) return false
       if (filter.value.positions.length > 0 && !filter.value.positions.includes(valve.position)) return false
       if (filter.value.heatModes.length > 0) {
         const mode = item.building ? item.building.heatMode : ''
@@ -99,7 +106,8 @@ export const useValveStore = defineStore('valve', () => {
     return (await valveTable.create(
       {
         buildingId: draft.buildingId,
-        stationId: building ? building.stationId : stationStore.currentStationId ?? '',
+        // 新登记阀门的冗余站按当前生效归属（含已到点的迁入），不是楼栋台账里的原始站
+        stationId: building ? stationStore.effectiveStationIdOfBuilding(building.id) : stationStore.currentStationId ?? '',
         code: draft.code.trim() || `VLV-${Date.now().toString().slice(-5)}`,
         dn: Math.max(0, Math.round(draft.dn)),
         currentOpening: clampOpening(draft.currentOpening),
@@ -116,7 +124,7 @@ export const useValveStore = defineStore('valve', () => {
     if (patch.currentOpening !== undefined) next.currentOpening = clampOpening(patch.currentOpening)
     if (patch.buildingId !== undefined) {
       const building = stationStore.buildingById.get(patch.buildingId)
-      if (building) next.stationId = building.stationId
+      if (building) next.stationId = stationStore.effectiveStationIdOfBuilding(building.id)
     }
     await valveTable.update(id, next)
   }
@@ -153,9 +161,15 @@ export const useValveStore = defineStore('valve', () => {
   async function bulkCommitOpenings(): Promise<number> {
     const entries = Object.entries(openingDraft.value)
     if (entries.length === 0) return 0
+    const now = Date.now()
     const rows = valves.value
       .filter((valve) => entries.some(([id]) => id === valve.id))
-      .map((valve) => ({ ...valve, currentOpening: clampOpening(openingDraft.value[valve.id]), updatedAt: Date.now() }))
+      .map((valve) => ({
+        ...valve,
+        currentOpening: clampOpening(openingDraft.value[valve.id]),
+        updatedAt: now,
+        revision: (valve.revision ?? ROW_REVISION - 1) + 1
+      }))
     if (rows.length > 0) await db.valves.bulkPut(rows)
     clearOpeningDraft()
     return rows.length

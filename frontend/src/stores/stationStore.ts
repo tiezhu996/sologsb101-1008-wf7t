@@ -17,10 +17,13 @@ import {
 import type { Building, BuildingDraft, HeatMode } from '@/types/building'
 import { HEAT_MODES } from '@/types/building'
 import type { StationDraft } from '@/types/station'
+import { useMigrationStore } from '@/stores/migrationStore'
+import { resolveBuildingStationAt } from '@/utils/migration'
 
 export const useStationStore = defineStore('station', () => {
   const stationTable = useIdbTable<StationRow>((database) => database.stations, { sortByUpdatedAt: false })
   const buildingTable = useIdbTable<BuildingRow>((database) => database.buildings, { sortByUpdatedAt: false })
+  const migrationStore = useMigrationStore()
 
   const currentStationId = ref<string | null>(readUiPrefs().lastStationId)
   const keyword = ref('')
@@ -154,6 +157,21 @@ export const useStationStore = defineStore('station', () => {
     return buildings.value.filter((item) => item.stationId === stationId)
   }
 
+  /**
+   * 楼栋在指定时点（默认现在）的生效归属站 id：
+   * 越过迁移生效时点即认目标站（待生效迁移不计入），未命中迁移认当前台账站。
+   */
+  function effectiveStationIdOfBuilding(buildingId: string, at: number = Date.now()): string {
+    const building = buildingById.value.get(buildingId)
+    const resolved = resolveBuildingStationAt(buildingId, at, migrationStore.chain)
+    return resolved ?? building?.stationId ?? ''
+  }
+
+  /** 当前实际挂在某站名下的楼栋（含已到生效时点的迁入，排除待生效迁移） */
+  function effectiveBuildingsOfStation(stationId: string, at: number = Date.now()): Building[] {
+    return buildings.value.filter((item) => effectiveStationIdOfBuilding(item.id, at) === stationId)
+  }
+
   function getStation(id: string): Promise<StationRow | undefined> {
     return db.stations.get(id)
   }
@@ -187,6 +205,8 @@ export const useStationStore = defineStore('station', () => {
     setAreaRange,
     resetFilter,
     buildingsOf,
+    effectiveStationIdOfBuilding,
+    effectiveBuildingsOfStation,
     getStation
   }
 })

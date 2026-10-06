@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useStationStore } from '@/stores/stationStore'
 import { useValveStore } from '@/stores/valveStore'
 import { useAdjustStore } from '@/stores/adjustStore'
+import { useMigrationStore } from '@/stores/migrationStore'
 import { useImbalanceRank } from '@/hooks/useImbalanceRank'
 
 const route = useRoute()
@@ -11,6 +12,7 @@ const router = useRouter()
 const stationStore = useStationStore()
 const valveStore = useValveStore()
 const adjustStore = useAdjustStore()
+const migrationStore = useMigrationStore()
 const rank = useImbalanceRank()
 
 const navItems = computed(() => [
@@ -18,7 +20,8 @@ const navItems = computed(() => [
   { path: '/valves', label: '阀位登记', badge: String(valveStore.valves.length) },
   { path: '/measures', label: '实测录入', badge: String(rank.measureTable.rows.value.length) },
   { path: '/balance', label: '失衡度计算', badge: String(rank.summary.value.severe) },
-  { path: '/adjusts', label: '调节单', badge: String(adjustStore.stateCounts['待下发']) }
+  { path: '/adjusts', label: '调节单', badge: String(adjustStore.stateCounts['待下发']) },
+  { path: '/migrations', label: '并站迁移', badge: String(migrationStore.pendingCount) }
 ])
 
 const activePath = computed(() => {

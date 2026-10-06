@@ -13,6 +13,7 @@ import BalanceTag from '@/components/common/BalanceTag.vue'
 import { useAdjustStore, type AdjustEnriched } from '@/stores/adjustStore'
 import { useValveStore } from '@/stores/valveStore'
 import { useStationStore } from '@/stores/stationStore'
+import { useMigrationStore } from '@/stores/migrationStore'
 import { useImbalanceRank } from '@/hooks/useImbalanceRank'
 import {
   ADJUST_STATES,
@@ -42,6 +43,7 @@ type FilterModel = { keyword: string; [key: string]: string | string[] | boolean
 const adjustStore = useAdjustStore()
 const valveStore = useValveStore()
 const stationStore = useStationStore()
+const migrationStore = useMigrationStore()
 const rank = useImbalanceRank()
 
 // 把最新实测快照灌入调节单 store，用于重算失衡度
@@ -253,9 +255,10 @@ function exportCsv(): void {
     stationStore.buildings,
     valveStore.valves,
     rank.measureTable.rows.value,
-    adjustStore.adjusts
+    adjustStore.adjusts,
+    migrationStore.migrations
   )
-  MessagePlugin.success(`已导出 ${filename}`)
+  MessagePlugin.success(`已导出 ${filename}（换热站按派单时归属认原站）`)
 }
 
 function exportJson(): void {
@@ -388,7 +391,7 @@ function clearData(): void {
           <div>
             <strong>{{ row.valve ? row.valve.code : '阀门已删除' }}</strong>
             <div class="muted">
-              {{ row.valve ? stationStore.stationById.get(row.valve.stationId)?.name ?? '' : '' }}
+              {{ row.station ? row.station.name : '未知换热站' }}
             </div>
           </div>
         </template>
@@ -445,7 +448,9 @@ function clearData(): void {
         <t-descriptions-item label="阀门 / 实测">
           {{ counts.valves ?? 0 }} / {{ counts.measures ?? 0 }}
         </t-descriptions-item>
-        <t-descriptions-item label="调节单">{{ counts.adjusts ?? 0 }}</t-descriptions-item>
+        <t-descriptions-item label="调节单 / 迁移记录">
+          {{ counts.adjusts ?? 0 }} / {{ counts.stationMigrations ?? 0 }}
+        </t-descriptions-item>
       </t-descriptions>
       <div class="toolbar" style="margin-top: 14px">
         <t-button theme="primary" variant="outline" @click="exportJson">导出全量 JSON</t-button>

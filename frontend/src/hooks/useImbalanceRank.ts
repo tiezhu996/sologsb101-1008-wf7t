@@ -22,13 +22,20 @@ import {
   suggestOpening,
   type BalanceLevel
 } from '@/utils/balance'
+import { useMigrationStore } from '@/stores/migrationStore'
+import { resolveMeasureStationId, resolveValveStationAt } from '@/utils/migration'
 
 export interface ImbalanceRow {
   valve: Valve
   building: Building | null
+  /** 排行口径下的站：当前生效归属（迁移到点后走新站） */
   station: Station | null
+  /** 当前生效归属站 id */
+  effectiveStationId: string
   latest: Measure | null
   measureCount: number
+  /** 最新实测当时的归属站 id：历史导出按此认原站，不追溯 */
+  latestStationId: string
   /** 最新实测流量，无实测时为 0 */
   measured: number
   ratio: number
@@ -63,6 +70,7 @@ export interface UseImbalanceRankResult {
 export function useImbalanceRank(): UseImbalanceRankResult {
   const stationStore = useStationStore()
   const valveStore = useValveStore()
+  const migrationStore = useMigrationStore()
   const measureTable = useIdbTable<MeasureRow>((database) => database.measures, { sortByUpdatedAt: false })
 
   const rows = computed<ImbalanceRow[]>(() => {
@@ -73,6 +81,7 @@ export function useImbalanceRank(): UseImbalanceRankResult {
       else grouped.set(measure.valveId, [measure])
     })
 
+    const now = Date.now()
     const list = valveStore.valves.map((valve) => {
       const own = (grouped.get(valve.id) ?? []).sort((a, b) => a.date.localeCompare(b.date))
       const latest = own.length > 0 ? own[own.length - 1] : null
@@ -83,12 +92,18 @@ export function useImbalanceRank(): UseImbalanceRankResult {
       const value = latest ? imbalance(measured, design, room) : 0
       const level = latest ? balanceLevel(value, measured, design) : '平衡'
       const building = stationStore.buildings.find((item) => item.id === valve.buildingId) ?? null
-      const station = stationStore.stations.find((item) => item.id === valve.stationId) ?? null
+      const effectiveStationId = resolveValveStationAt(valve, building, now, migrationStore.chain)
+      const station = stationStore.stations.find((item) => item.id === effectiveStationId) ?? null
+      const latestStationId = latest
+        ? resolveMeasureStationId(latest, valve, migrationStore.chain)
+        : effectiveStationId
       return {
         valve,
         building,
         station,
+        effectiveStationId,
         latest,
+        latestStationId,
         measureCount: own.length,
         measured,
         ratio,
@@ -106,7 +121,7 @@ export function useImbalanceRank(): UseImbalanceRankResult {
     const filter = valveStore.filter
     const text = filter.keyword.trim().toLowerCase()
     return rows.value.filter((row) => {
-      if (filter.stationId && row.valve.stationId !== filter.stationId) return false
+      if (filter.stationId && row.effectiveStationId !== filter.stationId) return false
       if (filter.positions.length > 0 && !filter.positions.includes(row.valve.position)) return false
       if (filter.heatModes.length > 0) {
         const mode = row.building ? row.building.heatMode : ''

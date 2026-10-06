@@ -4,6 +4,11 @@ export type AdjustState = '待下发' | '已调节' | '已复核'
 export interface Adjust {
   id: string
   valveId: string
+  /**
+   * 归属换热站快照：派单时按当时生效归属写入，之后不再改写。
+   * 用于并站迁移后「生效前的调节单仍认原站、不追溯改站」；旧备份缺省时按时效解析兜底。
+   */
+  stationId?: string
   /** 目标开度（%） */
   targetOpening: number
   /** 调节依据 */
@@ -27,6 +32,8 @@ export const ADJUST_STATE_FLOW: Record<AdjustState, AdjustState | null> = {
 
 export interface AdjustDraft {
   valveId: string
+  /** 归属换热站快照（由派单侧按阀门当前生效归属灌入） */
+  stationId?: string
   targetOpening: number
   basis: string
   executor: string
@@ -36,6 +43,7 @@ export interface AdjustDraft {
 
 export const EMPTY_ADJUST_DRAFT: AdjustDraft = {
   valveId: '',
+  stationId: '',
   targetOpening: 50,
   basis: '',
   executor: '',

@@ -101,9 +101,14 @@ const rules = {
 
 const buildingOptions = computed(() =>
   stationStore.buildings
-    .filter((building) => !valveStore.filter.stationId || building.stationId === valveStore.filter.stationId)
+    .filter(
+      (building) =>
+        !valveStore.filter.stationId ||
+        stationStore.effectiveStationIdOfBuilding(building.id) === valveStore.filter.stationId
+    )
     .map((building) => {
-      const station = stationStore.stationById.get(building.stationId)
+      const stationId = stationStore.effectiveStationIdOfBuilding(building.id)
+      const station = stationStore.stationById.get(stationId)
       return {
         label: `${station ? station.name : '未知站'} · ${building.name}（${building.heatMode}）`,
         value: building.id
