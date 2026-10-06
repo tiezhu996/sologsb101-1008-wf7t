@@ -7,11 +7,13 @@ import { computed, type ComputedRef } from 'vue'
 import { useIdbTable, type UseIdbTableResult } from '@/hooks/useIdbTable'
 import { useStationStore } from '@/stores/stationStore'
 import { useValveStore } from '@/stores/valveStore'
+import { useMigrationStore } from '@/stores/migrationStore'
 import type { Measure } from '@/types/measure'
 import type { Valve } from '@/types/valve'
 import type { Building } from '@/types/building'
 import type { Station } from '@/types/station'
 import type { MeasureRow } from '@/utils/db'
+import { stationOfValveAt } from '@/utils/stationAttribution'
 import {
   balanceLevel,
   flowDeviationPct,
@@ -63,6 +65,7 @@ export interface UseImbalanceRankResult {
 export function useImbalanceRank(): UseImbalanceRankResult {
   const stationStore = useStationStore()
   const valveStore = useValveStore()
+  const migrationStore = useMigrationStore()
   const measureTable = useIdbTable<MeasureRow>((database) => database.measures, { sortByUpdatedAt: false })
 
   const rows = computed<ImbalanceRow[]>(() => {
@@ -83,7 +86,9 @@ export function useImbalanceRank(): UseImbalanceRankResult {
       const value = latest ? imbalance(measured, design, room) : 0
       const level = latest ? balanceLevel(value, measured, design) : '平衡'
       const building = stationStore.buildings.find((item) => item.id === valve.buildingId) ?? null
-      const station = stationStore.stations.find((item) => item.id === valve.stationId) ?? null
+      // 排行口径：按当前时点认定归属站（迁移生效后走新站）
+      const stationId = stationOfValveAt(valve, stationStore.buildings, migrationStore.transfers, Date.now())
+      const station = stationStore.stations.find((item) => item.id === stationId) ?? null
       return {
         valve,
         building,
@@ -105,8 +110,17 @@ export function useImbalanceRank(): UseImbalanceRankResult {
   const filteredRows = computed<ImbalanceRow[]>(() => {
     const filter = valveStore.filter
     const text = filter.keyword.trim().toLowerCase()
+    const now = Date.now()
     return rows.value.filter((row) => {
-      if (filter.stationId && row.valve.stationId !== filter.stationId) return false
+      if (filter.stationId) {
+        const stationId = stationOfValveAt(
+          row.valve,
+          stationStore.buildings,
+          migrationStore.transfers,
+          now
+        )
+        if (stationId !== filter.stationId) return false
+      }
       if (filter.positions.length > 0 && !filter.positions.includes(row.valve.position)) return false
       if (filter.heatModes.length > 0) {
         const mode = row.building ? row.building.heatMode : ''

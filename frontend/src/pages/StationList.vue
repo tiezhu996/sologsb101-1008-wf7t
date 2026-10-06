@@ -13,7 +13,9 @@ import StatBadge from '@/components/common/StatBadge.vue'
 import { useStationStore } from '@/stores/stationStore'
 import { useValveStore } from '@/stores/valveStore'
 import { useAdjustStore } from '@/stores/adjustStore'
+import { useMigrationStore } from '@/stores/migrationStore'
 import { useImbalanceRank } from '@/hooks/useImbalanceRank'
+import { stationOfValveAt } from '@/utils/stationAttribution'
 import {
   EMPTY_BUILDING_DRAFT,
   HEAT_MODES,
@@ -29,21 +31,33 @@ const router = useRouter()
 const stationStore = useStationStore()
 const valveStore = useValveStore()
 const adjustStore = useAdjustStore()
+const migrationStore = useMigrationStore()
 const rank = useImbalanceRank()
 
 /* ------------------------------ 派生 ------------------------------ */
 
+// 卡片统计按「当前时点」归属：迁移生效后计入新站，待生效预约不计入
 const valveCountOf = (stationId: string): number =>
-  valveStore.valves.filter((valve) => valve.stationId === stationId).length
+  valveStore.valves.filter(
+    (valve) =>
+      stationOfValveAt(valve, stationStore.buildings, migrationStore.transfers, Date.now()) === stationId
+  ).length
 
 const imbalancedCountOf = (stationId: string): number =>
-  rank.rows.value.filter((row) => row.valve.stationId === stationId && row.level !== '平衡').length
+  rank.rows.value.filter(
+    (row) =>
+      stationOfValveAt(row.valve, stationStore.buildings, migrationStore.transfers, Date.now()) === stationId &&
+      row.level !== '平衡'
+  ).length
 
 const pendingReviewOf = (stationId: string): number =>
   adjustStore.adjusts.filter((adjust) => {
     if (adjust.state === '已复核') return false
     const valve = valveStore.valves.find((item) => item.id === adjust.valveId)
-    return valve ? valve.stationId === stationId : false
+    // 未完单按「现在」认定站点（这类单本就挡迁移，不会跨站悬留）
+    return valve
+      ? stationOfValveAt(valve, stationStore.buildings, migrationStore.transfers, Date.now()) === stationId
+      : false
   }).length
 
 const stationColumns = [

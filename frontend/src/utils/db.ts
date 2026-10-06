@@ -9,9 +9,10 @@ import type { Building } from '@/types/building'
 import type { Valve } from '@/types/valve'
 import type { Measure } from '@/types/measure'
 import type { Adjust } from '@/types/adjust'
+import type { StationTransfer } from '@/types/stationTransfer'
 
 export const DB_NAME = 'gbheatgrid'
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 export const LS_KEYS = {
   dbVersion: 'gbheatgrid:db-version',
@@ -26,28 +27,40 @@ export interface UiPrefs {
 
 export const DEFAULT_UI_PREFS: UiPrefs = { lastStationId: null, onlyImbalanced: false }
 
+/**
+ * 备份载荷：
+ * - stationTransfers 为 v3 新增；旧备份（v1/v2）不含该字段，导入时按空表兼容
+ * - 保留 revision：整包迁移用 revision 做「确认前被别人改过」的乐观锁比对，
+ *   备份往返后冲突检测仍然成立
+ */
 export interface BackupPayload {
   app: 'gbheatgrid'
   dbVersion: number
   exportedAt: string
-  stations: Station[]
-  buildings: Building[]
-  valves: Valve[]
-  measures: Measure[]
-  adjusts: Adjust[]
+  stations: Array<Station & Partial<Revisioned>>
+  buildings: Array<Building & Partial<Revisioned>>
+  valves: Array<Valve & Partial<Revisioned>>
+  measures: Array<Measure & Partial<Revisioned>>
+  adjusts: Array<Adjust & Partial<Revisioned>>
+  stationTransfers?: Array<StationTransfer & Partial<Revisioned>>
 }
 
 export interface Revisioned {
   revision?: number
 }
 
-export const ROW_REVISION = 2
+/**
+ * 行修订号：每次业务写入递增，迁移台用它检测「楼栋或阀门在确认前被别人改过」。
+ * 同时兼作行格式版本：旧库 / 旧备份里缺失或小于该值的行先补齐到该值。
+ */
+export const ROW_REVISION = 3
 
 export type StationRow = Station & Revisioned
 export type BuildingRow = Building & Revisioned
 export type ValveRow = Valve & Revisioned
 export type MeasureRow = Measure & Revisioned
 export type AdjustRow = Adjust & Revisioned
+export type StationTransferRow = StationTransfer & Revisioned
 
 class HeatGridDatabase extends Dexie {
   stations!: Table<StationRow, string>
@@ -55,6 +68,7 @@ class HeatGridDatabase extends Dexie {
   valves!: Table<ValveRow, string>
   measures!: Table<MeasureRow, string>
   adjusts!: Table<AdjustRow, string>
+  stationTransfers!: Table<StationTransferRow, string>
 
   constructor() {
     super(DB_NAME)
@@ -111,6 +125,27 @@ class HeatGridDatabase extends Dexie {
               adjust.state = '待下发'
             }
           })
+      })
+
+    // v3：并网迁移——新增 stationTransfers 迁移记录表，全部行修订号升到 3
+    this.version(DB_VERSION)
+      .stores({
+        stations: 'id, name, commissionYear, updatedAt',
+        buildings: 'id, stationId, name, heatMode, updatedAt',
+        valves: 'id, buildingId, stationId, code, position, updatedAt',
+        measures: 'id, valveId, date, operator, updatedAt',
+        adjusts: 'id, valveId, state, executor, updatedAt',
+        stationTransfers: 'id, sourceStationId, targetStationId, effectiveAt, createdAt'
+      })
+      .upgrade(async (tx) => {
+        for (const name of ['stations', 'buildings', 'valves', 'measures', 'adjusts']) {
+          await tx
+            .table(name)
+            .toCollection()
+            .modify((row: Record<string, unknown>) => {
+              row.revision = ROW_REVISION
+            })
+        }
       })
   }
 }
@@ -235,6 +270,8 @@ export async function deleteStationCascade(stationId: string): Promise<void> {
     if (buildings.length > 0) await db.buildings.bulkDelete(buildings.map((item) => item.id))
     await db.stations.delete(stationId)
   })
+  // 注：stationTransfers 是并网历史凭证，不随站 / 楼栋删除而销毁；
+  // 历史归属解析只按现存楼栋链路计算，残留引用不影响业务口径。
 }
 
 export async function deleteBuildingCascade(buildingId: string): Promise<void> {
@@ -266,68 +303,157 @@ async function deleteValvesOfBuildings(buildingIds: string[]): Promise<void> {
 /* ============================ 整库导入导出 ============================ */
 
 export async function countAll(): Promise<Record<string, number>> {
-  const [stations, buildings, valves, measures, adjusts] = await Promise.all([
+  const [stations, buildings, valves, measures, adjusts, stationTransfers] = await Promise.all([
     db.stations.count(),
     db.buildings.count(),
     db.valves.count(),
     db.measures.count(),
-    db.adjusts.count()
+    db.adjusts.count(),
+    db.stationTransfers.count()
   ])
-  return { stations, buildings, valves, measures, adjusts }
+  return { stations, buildings, valves, measures, adjusts, stationTransfers }
 }
 
 export async function exportSnapshot(): Promise<BackupPayload> {
-  const [stations, buildings, valves, measures, adjusts] = await Promise.all([
+  const [stations, buildings, valves, measures, adjusts, stationTransfers] = await Promise.all([
     db.stations.toArray(),
     db.buildings.toArray(),
     db.valves.toArray(),
     db.measures.toArray(),
-    db.adjusts.toArray()
+    db.adjusts.toArray(),
+    db.stationTransfers.toArray()
   ])
-  const strip = <T extends Revisioned>(row: T): Omit<T, 'revision'> => {
-    const { revision: _revision, ...rest } = row
-    return rest
-  }
   return {
     app: 'gbheatgrid',
     dbVersion: DB_VERSION,
     exportedAt: new Date().toISOString(),
-    stations: stations.map(strip),
-    buildings: buildings.map(strip),
-    valves: valves.map(strip),
-    measures: measures.map(strip),
-    adjusts: adjusts.map(strip)
+    stations,
+    buildings,
+    valves,
+    measures,
+    adjusts,
+    stationTransfers
   }
 }
 
+const isFiniteNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value)
+
+/** 归一化任意版本（v1/v2/v3）备份中的一行：补齐修订号与时间戳，丢弃缺主键的坏行 */
+function normalizeRow<T extends { id?: string; createdAt?: number; updatedAt?: number }>(
+  raw: T & Partial<Revisioned>,
+  fallbackStamp: number
+): (T & Revisioned) | null {
+  if (!raw || typeof raw.id !== 'string' || raw.id.length === 0) return null
+  const revision = isFiniteNumber(raw.revision) && raw.revision > 0 ? Math.round(raw.revision) : ROW_REVISION
+  return {
+    ...raw,
+    createdAt: isFiniteNumber(raw.createdAt) ? raw.createdAt : fallbackStamp,
+    updatedAt: isFiniteNumber(raw.updatedAt) ? raw.updatedAt : fallbackStamp,
+    revision
+  }
+}
+
+/**
+ * 导入整库快照：
+ * - 兼容旧备份：stationTransfers 缺失时按空表处理；旧行 revision 缺失先补齐；
+ * - 阀门缺冗余 stationId 时用所属楼栋回填；
+ * - 迁移记录只保留引用完整、字段合法的行，坏行跳过不影响整包导入。
+ */
 export async function importSnapshot(payload: BackupPayload): Promise<void> {
-  await db.transaction('rw', db.stations, db.buildings, db.valves, db.measures, db.adjusts, async () => {
-    await Promise.all([
-      db.stations.clear(),
-      db.buildings.clear(),
-      db.valves.clear(),
-      db.measures.clear(),
-      db.adjusts.clear()
-    ])
-    const rev = <T>(row: T): T & Revisioned => ({ ...row, revision: ROW_REVISION })
-    await db.stations.bulkPut((payload.stations ?? []).map(rev))
-    await db.buildings.bulkPut((payload.buildings ?? []).map(rev))
-    await db.valves.bulkPut((payload.valves ?? []).map(rev))
-    await db.measures.bulkPut((payload.measures ?? []).map(rev))
-    await db.adjusts.bulkPut((payload.adjusts ?? []).map(rev))
-  })
+  const now = Date.now()
+  const buildings = (payload.buildings ?? [])
+    .map((row) => normalizeRow(row, now))
+    .filter((row): row is BuildingRow => row !== null)
+  const buildingStation = new Map(buildings.map((row) => [row.id, row.stationId]))
+
+  const stations = (payload.stations ?? [])
+    .map((row) => normalizeRow(row, now))
+    .filter((row): row is StationRow => row !== null)
+
+  const valves = (payload.valves ?? [])
+    .map((raw) => {
+      const row = normalizeRow(raw, now)
+      if (!row) return null
+      if (typeof row.stationId !== 'string' || row.stationId.length === 0) {
+        row.stationId = buildingStation.get(row.buildingId) ?? ''
+      }
+      return row
+    })
+    .filter((row): row is ValveRow => row !== null)
+
+  const measures = (payload.measures ?? [])
+    .map((row) => normalizeRow(row, now))
+    .filter((row): row is MeasureRow => row !== null && typeof row.valveId === 'string')
+
+  const adjusts = (payload.adjusts ?? [])
+    .map((raw) => {
+      const row = normalizeRow(raw, now)
+      if (!row) return null
+      if (row.state !== '待下发' && row.state !== '已调节' && row.state !== '已复核') {
+        row.state = '待下发'
+      }
+      if (typeof row.reviewNote !== 'string') row.reviewNote = ''
+      return row
+    })
+    .filter((row): row is AdjustRow => row !== null && typeof row.valveId === 'string')
+
+  const knownStations = new Set(stations.map((row) => row.id))
+  const knownBuildings = new Set(buildings.map((row) => row.id))
+  const stationTransfers = (payload.stationTransfers ?? [])
+    .map((raw) => {
+      const row = normalizeRow(raw, now)
+      if (!row) return null
+      return row
+    })
+    .filter(
+      (row): row is StationTransferRow =>
+        row !== null &&
+        typeof row.sourceStationId === 'string' &&
+        typeof row.targetStationId === 'string' &&
+        knownStations.has(row.sourceStationId) &&
+        knownStations.has(row.targetStationId) &&
+        isFiniteNumber(row.effectiveAt) &&
+        Array.isArray(row.buildingIds) &&
+        row.buildingIds.every((id) => typeof id === 'string' && knownBuildings.has(id))
+    )
+
+  await db.transaction(
+    'rw',
+    [db.stations, db.buildings, db.valves, db.measures, db.adjusts, db.stationTransfers],
+    async () => {
+      await Promise.all([
+        db.stations.clear(),
+        db.buildings.clear(),
+        db.valves.clear(),
+        db.measures.clear(),
+        db.adjusts.clear(),
+        db.stationTransfers.clear()
+      ])
+      await db.stations.bulkPut(stations)
+      await db.buildings.bulkPut(buildings)
+      await db.valves.bulkPut(valves)
+      await db.measures.bulkPut(measures)
+      await db.adjusts.bulkPut(adjusts)
+      if (stationTransfers.length > 0) await db.stationTransfers.bulkPut(stationTransfers)
+    }
+  )
 }
 
 export async function clearAllTables(): Promise<void> {
-  await db.transaction('rw', db.stations, db.buildings, db.valves, db.measures, db.adjusts, async () => {
-    await Promise.all([
-      db.stations.clear(),
-      db.buildings.clear(),
-      db.valves.clear(),
-      db.measures.clear(),
-      db.adjusts.clear()
-    ])
-  })
+  await db.transaction(
+    'rw',
+    [db.stations, db.buildings, db.valves, db.measures, db.adjusts, db.stationTransfers],
+    async () => {
+      await Promise.all([
+        db.stations.clear(),
+        db.buildings.clear(),
+        db.valves.clear(),
+        db.measures.clear(),
+        db.adjusts.clear(),
+        db.stationTransfers.clear()
+      ])
+    }
+  )
 }
 
 export async function resetDatabase(): Promise<void> {

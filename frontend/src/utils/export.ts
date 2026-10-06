@@ -6,7 +6,9 @@ import type { Building } from '@/types/building'
 import type { Valve } from '@/types/valve'
 import type { Measure } from '@/types/measure'
 import type { Adjust } from '@/types/adjust'
+import type { StationTransfer } from '@/types/stationTransfer'
 import { imbalance, balanceLevel, flowRatio } from '@/utils/balance'
+import { stationOfBuildingAt } from '@/utils/stationAttribution'
 
 export function download(filename: string, content: string, mime: string): void {
   const blob = new Blob([content], { type: mime })
@@ -37,14 +39,16 @@ export function csvCell(value: string | number): string {
   return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
 }
 
-/** 导出调节单 CSV（含失衡度与流量比） */
+/** 导出调节单 CSV（含失衡度与流量比；站点按调节单创建时点认定，不追溯改站） */
 export function exportAdjustCsv(
   stations: Station[],
   buildings: Building[],
   valves: Valve[],
   measures: Measure[],
-  adjusts: Adjust[]
+  adjusts: Adjust[],
+  transfers: StationTransfer[] = []
 ): string {
+  const stationById = new Map(stations.map((station) => [station.id, station]))
   const header = [
     '换热站',
     '楼栋',
@@ -69,7 +73,11 @@ export function exportAdjustCsv(
   adjusts.forEach((adjust) => {
     const valve = valves.find((item) => item.id === adjust.valveId)
     const building = valve ? buildings.find((item) => item.id === valve.buildingId) ?? null : null
-    const station = building ? stations.find((item) => item.id === building.stationId) ?? null : null
+    // 归属站以调节单创建时点解析：并网点之前的旧单导出仍打来源站
+    const resolvedStationId = building
+      ? stationOfBuildingAt(building.stationId, transfers, building.id, adjust.createdAt)
+      : null
+    const station = resolvedStationId ? stationById.get(resolvedStationId) ?? null : null
     const own = measures.filter((item) => item.valveId === adjust.valveId).sort((a, b) => a.date.localeCompare(b.date))
     const latest = own[own.length - 1]
     const design = valve ? valve.designFlowM3h : 0

@@ -13,12 +13,17 @@ import {
   type AdjustState
 } from '@/types/adjust'
 import { useValveStore } from '@/stores/valveStore'
+import { useStationStore } from '@/stores/stationStore'
+import { useMigrationStore } from '@/stores/migrationStore'
+import { stationOfValveAt } from '@/utils/stationAttribution'
 import { balanceLevel, imbalance, type BalanceLevel } from '@/utils/balance'
 import type { Valve } from '@/types/valve'
 
 export interface AdjustEnriched {
   adjust: Adjust
   valve: Valve | null
+  /** 调节单创建时点认定的归属站（历史单不随楼栋改挂而追溯改站） */
+  stationId: string | null
   /** 生成调节单时的失衡度快照（按最新实测重算） */
   imbalanceValue: number
   level: BalanceLevel
@@ -27,6 +32,8 @@ export interface AdjustEnriched {
 export const useAdjustStore = defineStore('adjust', () => {
   const adjustTable = useIdbTable<AdjustRow>((database) => database.adjusts, { sortByUpdatedAt: false })
   const valveStore = useValveStore()
+  const stationStore = useStationStore()
+  const migrationStore = useMigrationStore()
 
   const stateFilter = ref<AdjustState[]>([])
   const keyword = ref('')
@@ -52,6 +59,10 @@ export const useAdjustStore = defineStore('adjust', () => {
   const enriched = computed<AdjustEnriched[]>(() =>
     adjusts.value.map((adjust) => {
       const valve = valveStore.valves.find((item) => item.id === adjust.valveId) ?? null
+      // 调节单归属站以创建时点为准：生效前的旧单即使楼栋已改挂也仍认原站
+      const stationId = valve
+        ? stationOfValveAt(valve, stationStore.buildings, migrationStore.transfers, adjust.createdAt)
+        : null
       const snapshot = latestMeasureByValve.value[adjust.valveId]
       const design = valve ? valve.designFlowM3h : 0
       const measured = snapshot ? snapshot.flowM3h : 0
@@ -60,6 +71,7 @@ export const useAdjustStore = defineStore('adjust', () => {
       return {
         adjust,
         valve,
+        stationId,
         imbalanceValue: value,
         level: valve && snapshot ? balanceLevel(value, measured, design) : '平衡'
       }

@@ -1,6 +1,6 @@
 import { liveQuery } from 'dexie'
 import { onScopeDispose, ref, shallowRef, type Ref } from 'vue'
-import { db, createId } from '@/utils/db'
+import { db, createId, ROW_REVISION } from '@/utils/db'
 
 export type IdbRecord = { id: string; createdAt?: number; updatedAt?: number }
 
@@ -86,18 +86,26 @@ export function useIdbTable<T extends IdbRecord>(
       ...(payload as object),
       id: payload.id ?? createId(idPrefix),
       createdAt: payload.createdAt ?? now,
-      updatedAt: payload.updatedAt ?? now
-    } as T
+      updatedAt: payload.updatedAt ?? now,
+      revision: (payload as { revision?: number }).revision ?? ROW_REVISION
+    } as unknown as T
     await table.put(record)
     return record
   }
 
   const update = async (id: string, patch: Partial<T>): Promise<void> => {
-    await table.update(id, { ...patch, updatedAt: Date.now() } as never)
+    const updated = await table.update(id, { ...patch, updatedAt: Date.now() } as never)
+    if (updated === 0) return
+    // 修订号单调递增：迁移台据此发现「确认前被别人改过」
+    const current = await table.get(id)
+    const nextRevision = ((current as { revision?: number } | undefined)?.revision ?? 0) + 1
+    await table.update(id, { revision: nextRevision } as never)
   }
 
   const upsert = async (row: T): Promise<void> => {
-    await table.put({ ...row, updatedAt: Date.now() } as T)
+    const existing = (await table.get(row.id)) as { revision?: number } | undefined
+    const revision = existing ? (existing.revision ?? 0) + 1 : ROW_REVISION
+    await table.put({ ...row, updatedAt: Date.now(), revision } as T)
   }
 
   const remove = async (id: string): Promise<void> => {

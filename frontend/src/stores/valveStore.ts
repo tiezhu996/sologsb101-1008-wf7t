@@ -16,6 +16,8 @@ import {
 import type { Building } from '@/types/building'
 import type { Station } from '@/types/station'
 import { useStationStore } from '@/stores/stationStore'
+import { useMigrationStore } from '@/stores/migrationStore'
+import { stationOfValveAt } from '@/utils/stationAttribution'
 
 export interface ValveEnriched {
   valve: Valve
@@ -28,6 +30,7 @@ export interface ValveEnriched {
 export const useValveStore = defineStore('valve', () => {
   const valveTable = useIdbTable<ValveRow>((database) => database.valves, { sortByUpdatedAt: false })
   const stationStore = useStationStore()
+  const migrationStore = useMigrationStore()
 
   const filter = ref<ValveFilterState>(createEmptyValveFilter())
   /** 开度编辑草稿：阀门 id → 待提交开度 */
@@ -41,7 +44,9 @@ export const useValveStore = defineStore('valve', () => {
   const enriched = computed<ValveEnriched[]>(() =>
     valves.value.map((valve) => {
       const building = stationStore.buildingById.get(valve.buildingId) ?? null
-      const station = stationStore.stationById.get(valve.stationId) ?? null
+      // 当前归属站：生效后的迁移解析到新站，未到生效时点的预约迁移不可见
+      const stationId = stationOfValveAt(valve, stationStore.buildings, migrationStore.transfers, Date.now())
+      const station = stationStore.stationById.get(stationId) ?? null
       return {
         valve,
         building,
@@ -53,9 +58,14 @@ export const useValveStore = defineStore('valve', () => {
 
   const filtered = computed<ValveEnriched[]>(() => {
     const text = filter.value.keyword.trim().toLowerCase()
+    const now = Date.now()
     return enriched.value.filter((item) => {
       const { valve } = item
-      if (filter.value.stationId && valve.stationId !== filter.value.stationId) return false
+      if (filter.value.stationId) {
+        // 按站筛选走历史归属解析，与「当前在哪个站」口径一致
+        const stationId = stationOfValveAt(valve, stationStore.buildings, migrationStore.transfers, now)
+        if (stationId !== filter.value.stationId) return false
+      }
       if (filter.value.positions.length > 0 && !filter.value.positions.includes(valve.position)) return false
       if (filter.value.heatModes.length > 0) {
         const mode = item.building ? item.building.heatMode : ''

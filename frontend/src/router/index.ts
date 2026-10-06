@@ -36,6 +36,12 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/pages/AdjustOrder.vue'),
     meta: { title: '调节单下发与复核' }
   },
+  {
+    path: '/migration',
+    name: 'migration-console',
+    component: () => import('@/pages/MigrationConsole.vue'),
+    meta: { title: '并网迁移台' }
+  },
   { path: '/:pathMatch(.*)*', redirect: '/stations' }
 ]
 

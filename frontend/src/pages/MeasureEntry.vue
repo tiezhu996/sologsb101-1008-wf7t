@@ -14,6 +14,7 @@ import { useIdbTable } from '@/hooks/useIdbTable'
 import { useValveStore } from '@/stores/valveStore'
 import { useStationStore } from '@/stores/stationStore'
 import { useImbalanceRank } from '@/hooks/useImbalanceRank'
+import { useStationAttribution } from '@/hooks/useStationAttribution'
 import { EMPTY_MEASURE_DRAFT, type Measure, type MeasureDraft } from '@/types/measure'
 import type { MeasureRow } from '@/utils/db'
 import { balanceLevel, formatFlow, formatTemp, imbalance } from '@/utils/balance'
@@ -24,6 +25,7 @@ type FilterModel = { keyword: string; [key: string]: string | string[] | boolean
 const valveStore = useValveStore()
 const stationStore = useStationStore()
 const rank = useImbalanceRank()
+const attribution = useStationAttribution()
 const measureTable = useIdbTable<MeasureRow>((database) => database.measures, { sortByUpdatedAt: false })
 
 const activeValveId = ref<string>('')
@@ -67,6 +69,19 @@ const candidates = computed(() => valveStore.filtered)
 
 const activeValve = computed(() => valveStore.valves.find((valve) => valve.id === activeValveId.value) ?? null)
 const activeRow = computed(() => (activeValveId.value ? rank.rowOf(activeValveId.value) : null))
+
+/** 录实测口径：当前时点阀门归属哪站就显示哪站（迁移生效后走新站） */
+const activeStationName = computed(() => {
+  if (!activeValve.value) return ''
+  return attribution.stationOfValveNow(activeValve.value)?.name ?? ''
+})
+
+/** 历史实测温：按实测日期认定站点，生效前的旧实测仍认原站 */
+function stationNameOfMeasure(measure: MeasureRow): string {
+  const valve = valveStore.valves.find((item) => item.id === measure.valveId)
+  if (!valve) return '—'
+  return attribution.stationOfValveOnDate(valve, measure.date)?.name ?? '—'
+}
 
 const measuresOfActive = computed(() =>
   measureTable.rows.value
@@ -262,7 +277,7 @@ async function importBatch(): Promise<void> {
             <h3 class="panel-title" style="margin: 0">
               {{ activeValve.code }} · 实测明细
               <span class="muted">
-                {{ stationStore.stationById.get(activeValve.stationId)?.name ?? '' }}
+                {{ activeStationName }}
               </span>
             </h3>
             <div class="toolbar">
@@ -315,16 +330,20 @@ async function importBatch(): Promise<void> {
           <t-table
             :data="latestMeasures"
             :columns="[
-              { colKey: 'date', title: '日期', width: 120 },
-              { colKey: 'valve', title: '阀门', width: 130, cell: 'valveCell' },
-              { colKey: 'flow2', title: '流量', width: 120, cell: 'flow2Cell' },
-              { colKey: 'room2', title: '室温', width: 96, cell: 'room2Cell' },
-              { colKey: 'operator2', title: '录入人', width: 100, cell: 'operator2Cell' }
+              { colKey: 'date', title: '日期', width: 110 },
+              { colKey: 'station', title: '认定站点', width: 150, cell: 'stationCell' },
+              { colKey: 'valve', title: '阀门', width: 120, cell: 'valveCell' },
+              { colKey: 'flow2', title: '流量', width: 110, cell: 'flow2Cell' },
+              { colKey: 'room2', title: '室温', width: 90, cell: 'room2Cell' },
+              { colKey: 'operator2', title: '录入人', width: 90, cell: 'operator2Cell' }
             ]"
             row-key="id"
             bordered
             size="small"
           >
+            <template #stationCell="{ row }">
+              <span class="muted">{{ stationNameOfMeasure(row) }}</span>
+            </template>
             <template #valveCell="{ row }">
               {{ valveStore.valves.find((valve) => valve.id === row.valveId)?.code ?? '—' }}
             </template>

@@ -32,7 +32,7 @@ docker compose up -d --build      # 改代码后重新构建启动
 | 框架 | Vue 3.5 | `<script setup>` + Composition API |
 | 语言 | TypeScript 5.7 | `strict` 严格模式，构建前执行 `vue-tsc --noEmit` |
 | UI 组件 | TDesign Vue Next 1.20 | 表格、表单、Dialog、Tag、Descriptions、Progress |
-| 状态管理 | Pinia 2.3 | `stationStore` / `valveStore` / `adjustStore` |
+| 状态管理 | Pinia 2.3 | `stationStore` / `valveStore` / `adjustStore` / `migrationStore` |
 | 路由 | Vue Router 4.5 | History 模式，nginx `try_files` 回退 |
 | 本地持久化 | Dexie 4（IndexedDB） | 版本号 + `upgrade` 迁移 + 幂等播种 |
 | 构建 | Vite 6 | 输出 `dist/`，按路由自动分包 |
@@ -53,13 +53,13 @@ sologsb101-1008/
     ├── package.json / tsconfig.json / vite.config.ts / index.html
     ├── public/favicon.svg
     └── src/
-        ├── types/              # station.ts building.ts valve.ts measure.ts adjust.ts
-        ├── stores/             # stationStore.ts valveStore.ts adjustStore.ts
+        ├── types/              # station.ts building.ts valve.ts measure.ts adjust.ts stationTransfer.ts
+        ├── stores/             # stationStore.ts valveStore.ts adjustStore.ts migrationStore.ts
         ├── components/common/  # BalanceTag.vue FilterBar.vue StatBadge.vue EmptyPanel.vue
-        ├── hooks/              # useImbalanceRank.ts useIdbTable.ts
-        ├── pages/              # StationList.vue ValveList.vue MeasureEntry.vue BalanceBoard.vue AdjustOrder.vue
+        ├── hooks/              # useImbalanceRank.ts useIdbTable.ts useStationAttribution.ts
+        ├── pages/              # StationList.vue ValveList.vue MeasureEntry.vue BalanceBoard.vue AdjustOrder.vue MigrationConsole.vue
         ├── router/index.ts
-        ├── utils/              # balance.ts db.ts export.ts
+        ├── utils/              # balance.ts db.ts export.ts stationAttribution.ts stationTransferService.ts
         ├── styles/main.css
         ├── App.vue
         └── main.ts
@@ -74,12 +74,21 @@ sologsb101-1008/
 | `/measures` | 实测流量/供回水温录入 | Measure、Valve | 按日期成组录入流量与三温；支持「阀门编号,日期,流量,供温,回温,室温,录入人」批量粘贴导入并即时预览失衡度 |
 | `/balance` | 失衡度计算与排序 | Valve、Measure | 按失衡度降序排行；仅看失衡；导出失衡度 CSV；单条/一键生成调节单 |
 | `/adjusts` | 调节单下发与复核 | Adjust、Valve、Measure | 状态机 待下发→已调节（回写阀门开度）→已复核（记录复核意见）；导出调节单 CSV 与全量 JSON |
+| `/migration` | 并网迁移台 | Station、Building、Valve、Adjust、StationTransfer | 选来源站/目标站/生效时点并勾选楼栋，预检受影响阀门与未完调节单，整包迁移；迁移记录可查待生效/已生效 |
 
 ## 五、数据存储说明
 
 - **IndexedDB 库名**：`gbheatgrid`（Dexie 封装，`src/utils/db.ts`）
-- **对象表**：`stations`、`buildings`、`valves`、`measures`、`adjusts`
-- **数据结构版本**：`DB_VERSION = 2`，含 `version(1)` → `version(2)` 的索引变更与 `upgrade()` 迁移（补齐 `revision`、用所属楼栋回填阀门 `stationId` 冗余列、规整开度与复核字段）
+- **对象表**：`stations`、`buildings`、`valves`、`measures`、`adjusts`、`stationTransfers`
+- **数据结构版本**：`DB_VERSION = 3`
+  - `version(1)` → `version(2)`：补齐 `revision`、用所属楼栋回填阀门 `stationId` 冗余列、规整开度与复核字段
+  - `version(3)`：新增 `stationTransfers` 并网迁移记录表，全部行修订号升到 3
+- **并网迁移口径**（`/migration`，详见 `utils/stationAttribution.ts`、`utils/stationTransferService.ts`）：
+  - 预检先列受影响阀门与未完调节单；有**未下发**或**已调节未复核**的单子硬性挡住迁移
+  - 楼栋归属、阀门冗余站标识、迁移记录三处同一事务整包写入，任一失败整体回滚；提交后再校验，异常按迁移前快照补偿恢复
+  - 乐观锁：楼栋/阀门修订号（`revision`，每次业务写入递增）在确认时比对，确认前被别人改过则整包不写入并保留原数据
+  - 生效时点（`effectiveAt`）之后排行、录实测、派单走新站；生效前已发生的实测、调节单与导出按发生时点仍认原站，**不追溯改站**；未到生效时点的预约迁移对当前业务不可见
+- **备份兼容**：导出的 JSON 保留 `revision` 与 `stationTransfers`；导入 v1/v2 旧备份时迁移表按空表处理、旧行补齐修订号、阀门按楼栋回填冗余站，坏行跳过不阻断导入
 - **首屏自动播种**：`initDatabase()` 中 `if (await db.stations.count() === 0) await seedDatabase()`，播种 2 座换热站 → 5 栋楼 → 10 只阀门 → 20 条实测 → 4 张调节单的互相引用数据；播种幂等
 - **localStorage 辅助键**：`gbheatgrid:db-version`、`gbheatgrid:last-backup-at`、`gbheatgrid:ui-prefs`（上次选中换热站、仅看失衡开关）
 - 应用为**无状态容器**：数据不落容器磁盘、不使用数据库服务、不挂载命名卷
